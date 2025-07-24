@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.entity_platform import async_get_current_platform
 
-from .const import DOMAIN, SERVICE_UUID  # Add other UUIDs as constants if needed
+from .const import DOMAIN, SERVICE_UUID  # Add other UUIDs as needed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -73,6 +73,8 @@ class EasyStartCoordinator:
                     max_attempts=5,
                     use_services_cache=True
                 )
+                # Explicitly discover services to ensure characteristics are available
+                await self.client.get_services()
                 self._connected = True
                 _LOGGER.info(f"Connected to EasyStart Flex at {self.device.address}")
                 await self.client.start_notify("0000fff1-0000-1000-8000-00805f9b34fb", self._handle_notification)
@@ -112,18 +114,17 @@ class EasyStartCoordinator:
             self.data["last_start_peak"] = data[6]  # Example; adjust based on testing
         if len(data) >= 8:
             self.data["scpt_delay"] = data[7]
-        # Trigger updates (entities will pull from self.data)
+        # Trigger updates
         platform = async_get_current_platform()
-        await platform.async_add_entities([])  # Force refresh; consider DataUpdateCoordinator for better efficiency
+        await platform.async_add_entities([])  # Force refresh
 
     async def update_data(self):
         """Poll for static data."""
         await self.connect()
         try:
-            total_starts_bytes = await self.client.read_gatt_char("0000fff4-0000-1000-8000-00805f9b34fb")  # Example UUID
+            total_starts_bytes = await self.client.read_gatt_char("0000fff4-0000-1000-8000-00805f9b34fb")
             self.data["total_starts"] = int.from_bytes(total_starts_bytes, "big")
-            total_faults_bytes = await self.client.read_gatt_char("0000fff5-0000-1000-8000-00805f9b34fb")  # Adjust UUID if needed
+            total_faults_bytes = await self.client.read_gatt_char("0000fff5-0000-1000-8000-00805f9b34fb")
             self.data["total_faults"] = int.from_bytes(total_faults_bytes, "big")
-            # Add more reads for other static values if known
         except Exception as e:
             _LOGGER.warning(f"Update failed: {e}")

@@ -38,7 +38,7 @@ class EasyStartBaseSensor(SensorEntity):
             name="Micro-Air EasyStart Flex",
             manufacturer="Micro-Air",
             model="EasyStart Flex",
-            sw_version="1.0",  // Update if known
+            sw_version="1.0",  # Update if known
         )
 
     @property
