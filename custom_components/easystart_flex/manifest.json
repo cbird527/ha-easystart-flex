@@ -1,0 +1,12 @@
+{
+  "domain": "easystart_flex",
+  "name": "Micro-Air EasyStart Flex",
+  "version": "0.0.1",
+  "documentation": "https://github.com/cbird527/ha-easystart-flex",  
+  "issue_tracker": "https://github.com/cbird527/ha-easystart-flex/issues",  
+  "requirements": [],
+  "dependencies": ["bluetooth"],
+  "codeowners": ["@cbird527"],
+  "iot_class": "local_polling",
+  "config_flow": true
+}
