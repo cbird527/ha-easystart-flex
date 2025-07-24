@@ -4,8 +4,8 @@
   "version": "0.0.1",
   "documentation": "https://github.com/cbird527/ha-easystart-flex",  
   "issue_tracker": "https://github.com/cbird527/ha-easystart-flex/issues",  
-  "requirements": [],
-  "dependencies": ["bluetooth"],
+  "requirements": ["bleak-retry-connector>=3.5.0"],
+  "dependencies": ["bluetooth", "bluetooth_adapters"],
   "codeowners": ["@cbird527"],
   "iot_class": "local_polling",
   "config_flow": true
