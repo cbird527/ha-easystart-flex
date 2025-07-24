@@ -3,11 +3,11 @@ import asyncio
 from bleak_retry_connector import BleakClientWithServiceCache, establish_connection, BleakError
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.entity_platform import async_get_current_platform
 
-from .const import DOMAIN, SERVICE_UUID  # Add other UUIDs as needed
+from .const import DOMAIN, SERVICE_UUID  # Add other UUIDs as constants if needed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -16,12 +16,13 @@ PLATFORMS = ["sensor", "binary_sensor", "switch"]
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up EasyStart Flex from a config entry."""
     mac = entry.data["mac"]
-    device = bluetooth.async_ble_device_from_address(hass, mac.upper(), connectable=True)  # Ensure connectable
+    device = bluetooth.async_ble_device_from_address(hass, mac.upper(), connectable=True)
     if not device:
         raise ConfigEntryNotReady(f"Could not find EasyStart Flex with MAC {mac}")
 
     coordinator = EasyStartCoordinator(hass, device)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    await coordinator.async_config_entry_first_refresh()  # Initial poll
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
@@ -40,7 +41,7 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await async_setup_entry(hass, entry)
 
 class EasyStartCoordinator:
-    """Coordinator for EasyStart Flex BLE connection."""
+    """Coordinator for EasyStart Flex BLE connection with auto-reconnect."""
     def __init__(self, hass: HomeAssistant, device):
         self.hass = hass
         self.device = device
@@ -48,26 +49,33 @@ class EasyStartCoordinator:
         self.data = {}
         self._lock = asyncio.Lock()
         self._connected = False
+        self._task = None
+
+    async def async_config_entry_first_refresh(self):
+        await self.connect()
+        self._task = self.hass.loop.create_task(self._poll_loop())
+
+    async def _poll_loop(self):
+        while True:
+            await self.update_data()
+            await asyncio.sleep(30)  # Poll every 30s for totals
 
     async def connect(self):
         async with self._lock:
             if self._connected:
                 return
             try:
-                # Use retry connector for reliable connection (10s+ timeout, retries)
                 self.client = await establish_connection(
                     BleakClientWithServiceCache,
                     device=self.device,
                     name="EasyStart Flex",
                     disconnected_callback=self._handle_disconnect,
-                    max_attempts=5,  # Retry up to 5 times
+                    max_attempts=5,
                     use_services_cache=True
                 )
                 self._connected = True
                 _LOGGER.info(f"Connected to EasyStart Flex at {self.device.address}")
-                # Enable notifications
                 await self.client.start_notify("0000fff1-0000-1000-8000-00805f9b34fb", self._handle_notification)
-                # Write to enable live mode
                 await self.client.write_gatt_char("0000fff2-0000-1000-8000-00805f9b34fb", bytearray([0x01]))
             except BleakError as e:
                 _LOGGER.error(f"Failed to connect: {e}")
@@ -77,44 +85,45 @@ class EasyStartCoordinator:
         if self.client and self._connected:
             await self.client.disconnect()
             self._connected = False
+        if self._task:
+            self._task.cancel()
 
+    @callback
     def _handle_disconnect(self, client):
         self._connected = False
-        _LOGGER.debug("Disconnected from EasyStart Flex")
+        _LOGGER.debug("Disconnected from EasyStart Flex - attempting auto-reconnect")
+        self.hass.loop.create_task(self.connect())  # Auto-reconnect
 
     async def _handle_notification(self, sender, data: bytearray):
-        """Parse BLE notification data (adapted from ESPHome lambdas)."""
+        """Parse BLE notification data."""
         if len(data) < 1:
             return
         status_code = data[0]
-        status_text = {
-            16: "Idle",
-            17: "Starting",
-            18: "Running",
-            # Add more from project (e.g., faults, diag)
-        }.get(status_code, "Unknown")
+        status_text = {16: "Idle", 17: "Starting", 18: "Running"}.get(status_code, "Unknown")
         self.data["status"] = status_text
         if len(data) >= 2:
-            self.data["fault_code"] = data[1]  # Example parsing
+            self.data["diag"] = data[1]  # Fault/diag code
         if len(data) >= 4:
-            runtime_high = data[2]
-            runtime_low = data[3]
-            self.data["runtime_hours"] = (runtime_high << 8) | runtime_low
-        # Add parsing for live current, frequency, etc., from updated project
+            self.data["runtime_hours"] = (data[2] << 8) | data[3]
         if len(data) >= 6:
-            self.data["live_current"] = data[4] / 10.0  # Example scaling
+            self.data["live_current"] = data[4] / 10.0  # Scaled current
             self.data["line_frequency"] = data[5]
-        # Trigger entity updates
+        if len(data) >= 7:
+            self.data["last_start_peak"] = data[6]  # Example; adjust based on testing
+        if len(data) >= 8:
+            self.data["scpt_delay"] = data[7]
+        # Trigger updates (entities will pull from self.data)
         platform = async_get_current_platform()
-        await platform.async_add_entities([])  # Refresh if needed; better use DataUpdateCoordinator for polling
+        await platform.async_add_entities([])  # Force refresh; consider DataUpdateCoordinator for better efficiency
 
     async def update_data(self):
-        """Poll for updates if notifications insufficient."""
+        """Poll for static data."""
         await self.connect()
-        # Read characteristics as needed (e.g., total starts, faults)
         try:
-            total_starts = await self.client.read_gatt_char("0000fff4-0000-1000-8000-00805f9b34fb")
-            self.data["total_starts"] = int.from_bytes(total_starts, "big")
-            # Add more reads
+            total_starts_bytes = await self.client.read_gatt_char("0000fff4-0000-1000-8000-00805f9b34fb")  # Example UUID
+            self.data["total_starts"] = int.from_bytes(total_starts_bytes, "big")
+            total_faults_bytes = await self.client.read_gatt_char("0000fff5-0000-1000-8000-00805f9b34fb")  # Adjust UUID if needed
+            self.data["total_faults"] = int.from_bytes(total_faults_bytes, "big")
+            # Add more reads for other static values if known
         except Exception as e:
             _LOGGER.warning(f"Update failed: {e}")

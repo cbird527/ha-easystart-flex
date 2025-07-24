@@ -1,7 +1,7 @@
 {
   "domain": "easystart_flex",
   "name": "Micro-Air EasyStart Flex",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "documentation": "https://github.com/cbird527/ha-easystart-flex",  
   "issue_tracker": "https://github.com/cbird527/ha-easystart-flex/issues",  
   "requirements": ["bleak-retry-connector>=3.5.0"],
