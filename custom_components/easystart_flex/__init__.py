@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.entity_platform import async_get_current_platform
 
-from .const import DOMAIN, SERVICE_UUID  # Add other UUIDs as needed
+from .const import DOMAIN, SERVICE_UUID, NOTIFY_UUID, WRITE_UUID, FAULT_UUID, RUNTIME_UUID, TOTAL_STARTS_UUID, TOTAL_FAULTS_UUID
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator = EasyStartCoordinator(hass, device)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
-    # Defer initial refresh to on-demand (e.g., switch)
+    # Do not attempt initial connection here; defer to switch
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
@@ -50,20 +50,23 @@ class EasyStartCoordinator:
         self._lock = asyncio.Lock()
         self._connected = False
         self._task = None
+        self.connection_pending = False  # Flag to control connection attempts
 
     async def async_config_entry_first_refresh(self):
-        pass  # Skip initial; handle on-demand
+        pass  # No initial connection
 
     async def _poll_loop(self):
-        while self._connected:  # Only poll if connected
+        while self._connected:
             await self.update_data()
-            await asyncio.sleep(30)  # Poll every 30s for totals
+            await asyncio.sleep(30)
 
     async def connect(self):
+        if not self.connection_pending:
+            return  # Only connect when switch toggles it
         async with self._lock:
             if self._connected:
                 return
-            for attempt in range(3):  # Retry 3 times on not found
+            for attempt in range(3):
                 try:
                     self.client = await establish_connection(
                         BleakClientWithServiceCache,
@@ -75,15 +78,16 @@ class EasyStartCoordinator:
                     )
                     self._connected = True
                     _LOGGER.info(f"Connected to EasyStart Flex at {self.device.address}")
-                    await self.client.start_notify("0000fff1-0000-1000-8000-00805f9b34fb", self._handle_notification)
-                    await self.client.write_gatt_char("0000fff2-0000-1000-8000-00805f9b34fb", bytearray([0x01]))
+                    await self.client.start_notify(NOTIFY_UUID, self._handle_notification)
+                    await self.client.write_gatt_char(WRITE_UUID, bytearray([0x01]))
                     self._task = self.hass.loop.create_task(self._poll_loop())
-                    return  # Success
+                    return
                 except BleakError as e:
                     _LOGGER.warning(f"Connection attempt {attempt+1} failed: {e} - Retrying in 5s...")
                     await asyncio.sleep(5)
-            _LOGGER.error("Failed to connect after retries - Device may not be powered or UUID mismatch")
+            _LOGGER.error("Failed to connect after retries - Ensure AC is running")
             self._connected = False
+            self.connection_pending = False  # Reset on failure
 
     async def disconnect(self):
         if self.client and self._connected:
@@ -91,45 +95,57 @@ class EasyStartCoordinator:
             self._connected = False
         if self._task:
             self._task.cancel()
+        self.connection_pending = False
 
     @callback
     def _handle_disconnect(self, client):
         self._connected = False
         _LOGGER.debug("Disconnected from EasyStart Flex - attempting auto-reconnect")
-        self.hass.loop.create_task(self.connect())  # Auto-reconnect
+        self.hass.loop.create_task(self.connect())
 
     async def _handle_notification(self, sender, data: bytearray):
-        """Parse BLE notification data."""
+        _LOGGER.debug(f"Raw notification data: {list(data)}")  # Log raw bytes for debugging
         if len(data) < 1:
             return
         status_code = data[0]
         status_text = {16: "Idle", 17: "Starting", 18: "Running"}.get(status_code, "Unknown")
         self.data["status"] = status_text
         if len(data) >= 2:
-            self.data["diag"] = data[1]  # Fault/diag code
+            self.data["diag"] = data[1]
         if len(data) >= 4:
             self.data["runtime_hours"] = (data[2] << 8) | data[3]
         if len(data) >= 6:
-            self.data["live_current"] = data[4] / 10.0  # Scaled current
+            self.data["live_current"] = data[4] / 10.0
             self.data["line_frequency"] = data[5]
         if len(data) >= 7:
-            self.data["last_start_peak"] = data[6]  # Example; adjust based on testing
+            self.data["last_start_peak"] = data[6]
         if len(data) >= 8:
             self.data["scpt_delay"] = data[7]
-        # Trigger updates
         platform = async_get_current_platform()
-        await platform.async_add_entities([])  # Force refresh
+        await platform.async_add_entities([])
 
     async def update_data(self):
         """Poll for static data."""
         if not self._connected:
             return
         try:
-            total_starts_bytes = await self.client.read_gatt_char("0000fff4-0000-1000-8000-00805f9b34fb")
+            fault_bytes = await self.client.read_gatt_char(FAULT_UUID)
+            _LOGGER.debug(f"Raw fault read: {list(fault_bytes)}")  # Debug raw bytes
+            self.data["fault_code"] = int.from_bytes(fault_bytes, "big")
+            runtime_bytes = await self.client.read_gatt_char(RUNTIME_UUID)
+            _LOGGER.debug(f"Raw runtime read: {list(runtime_bytes)}")  # Debug raw bytes
+            self.data["runtime_hours"] = int.from_bytes(runtime_bytes, "big")
+            total_starts_bytes = await self.client.read_gatt_char(TOTAL_STARTS_UUID)
+            _LOGGER.debug(f"Raw total starts read: {list(total_starts_bytes)}")  # Debug raw bytes
             self.data["total_starts"] = int.from_bytes(total_starts_bytes, "big")
-            total_faults_bytes = await self.client.read_gatt_char("0000fff5-0000-1000-8000-00805f9b34fb")
+            total_faults_bytes = await self.client.read_gatt_char(TOTAL_FAULTS_UUID)
+            _LOGGER.debug(f"Raw total faults read: {list(total_faults_bytes)}")  # Debug raw bytes
             self.data["total_faults"] = int.from_bytes(total_faults_bytes, "big")
-        except BleakError as e:
-            _LOGGER.warning(f"Update failed: {e} - Device may not expose this characteristic")
         except Exception as e:
-            _LOGGER.warning(f"Unexpected update error: {e}")
+            _LOGGER.warning(f"Update failed: {e}")
+
+    async def set_connection_pending(self, pending: bool):
+        """Set flag to trigger connection attempt."""
+        self.connection_pending = pending
+        if pending and not self._connected:
+            await self.connect()
